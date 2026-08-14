@@ -219,7 +219,6 @@
             color: #fff;
             transition: all 0.3s ease;
             padding: 10px;
-            position: relative;
         }
 
         .control-btn:hover {
@@ -512,6 +511,13 @@
             border-color: #f44;
             color: #f44;
         }
+
+        .loading {
+            font-size: 8px;
+            color: #666;
+            text-align: center;
+            margin-top: 20px;
+        }
     </style>
 </head>
 <body>
@@ -526,6 +532,7 @@
         <div class="drop-zone" id="dropZone">
             <div class="drop-zone-text">📂 ВЫБРАТЬ ФАЙЛЫ</div>
         </div>
+        <div class="loading" id="loading"></div>
     </div>
 
     <div class="player" id="player">
@@ -646,6 +653,11 @@
     <audio id="audio"></audio>
 
     <script>
+        const DB_NAME = 'vibeMusicDB';
+        const DB_VERSION = 1;
+        const STORE_NAME = 'tracks';
+        let db;
+
         const audio = document.getElementById('audio');
         const playBtn = document.getElementById('playBtn');
         const playIcon = document.getElementById('playIcon');
@@ -670,6 +682,7 @@
         const playerEl = document.getElementById('player');
         const dropZone = document.getElementById('dropZone');
         const clearBtn = document.getElementById('clearBtn');
+        const loadingEl = document.getElementById('loading');
 
         let playlist = [];
         let currentTrackIndex = 0;
@@ -678,6 +691,55 @@
         let source;
         let eqFilters = [];
         let eqEnabled = false;
+
+        function openDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => resolve(request.result);
+
+                request.onupgradeneeded = (event) => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains(STORE_NAME)) {
+                        db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+                    }
+                };
+            });
+        }
+
+        async function saveTrackToDB(trackData) {
+            const db = await openDB();
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([STORE_NAME], 'readwrite');
+                const store = transaction.objectStore(STORE_NAME);
+                const request = store.add(trackData);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function loadTracksFromDB() {
+            const db = await openDB();
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([STORE_NAME], 'readonly');
+                const store = transaction.objectStore(STORE_NAME);
+                const request = store.getAll();
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function clearDB() {
+            const db = await openDB();
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction([STORE_NAME], 'readwrite');
+                const store = transaction.objectStore(STORE_NAME);
+                const request = store.clear();
+                request.onsuccess = () => resolve();
+                request.onerror = () => reject(request.error);
+            });
+        }
 
         for (let i = 0; i < 40; i++) {
             const bar = document.createElement('div');
@@ -689,11 +751,32 @@
 
         const bars = visualizer.querySelectorAll('.bar');
 
-        loadPlaylist();
-
-        if (playlist.length > 0) {
-            showPlayer();
+        async function init() {
+            loadingEl.textContent = 'ЗАГРУЗКА...';
+            try {
+                const tracks = await loadTracksFromDB();
+                if (tracks.length > 0) {
+                    for (const track of tracks) {
+                        const blob = new Blob([track.data], { type: track.type });
+                        const url = URL.createObjectURL(blob);
+                        playlist.push({
+                            id: track.id,
+                            name: track.name,
+                            artist: track.artist,
+                            url: url
+                        });
+                    }
+                    showPlayer();
+                    loadTrack(0);
+                    renderPlaylist();
+                }
+            } catch (error) {
+                console.error('Ошибка загрузки:', error);
+            }
+            loadingEl.textContent = '';
         }
+
+        init();
 
         settingsBtn.addEventListener('click', () => {
             settingsPanel.classList.toggle('open');
@@ -812,39 +895,44 @@
         });
 
         async function handleFiles(files) {
-            for (const file of files) {
-                const url = URL.createObjectURL(file);
-                const metadata = await extractMetadata(file, url);
+            loadingEl.textContent = `ЗАГРУЗКА ${files.length} ТРЕКОВ...`;
 
-                playlist.push({
-                    name: metadata.title || file.name.replace(/\.[^/.]+$/, ''),
-                    artist: metadata.artist || '---',
-                    file: file,
-                    url: url
-                });
+            for (const file of files) {
+                try {
+                    const arrayBuffer = await file.arrayBuffer();
+
+                    const trackData = {
+                        name: file.name.replace(/\.[^/.]+$/, ''),
+                        artist: '---',
+                        data: arrayBuffer,
+                        type: file.type
+                    };
+
+                    const id = await saveTrackToDB(trackData);
+
+                    const blob = new Blob([arrayBuffer], { type: file.type });
+                    const url = URL.createObjectURL(blob);
+
+                    playlist.push({
+                        id: id,
+                        name: trackData.name,
+                        artist: trackData.artist,
+                        url: url
+                    });
+                } catch (error) {
+                    console.error('Ошибка сохранения трека:', error);
+                }
             }
 
-            savePlaylist();
+            loadingEl.textContent = '';
 
             if (playlist.length > 0) {
                 showPlayer();
-                loadTrack(currentTrackIndex);
+                if (currentTrackIndex === 0) {
+                    loadTrack(0);
+                }
                 renderPlaylist();
             }
-        }
-
-        async function extractMetadata(file, url) {
-            return new Promise((resolve) => {
-                const tempAudio = new Audio(url);
-
-                tempAudio.addEventListener('loadedmetadata', () => {
-                    resolve({ title: null, artist: null });
-                });
-
-                tempAudio.addEventListener('error', () => {
-                    resolve({ title: null, artist: null });
-                });
-            });
         }
 
         function loadTrack(index) {
@@ -972,33 +1060,17 @@
 
         audio.volume = 0.7;
 
-        clearBtn.addEventListener('click', () => {
+        clearBtn.addEventListener('click', async () => {
             if (confirm('Удалить все треки?')) {
                 playlist = [];
                 currentTrackIndex = 0;
                 audio.pause();
                 audio.src = '';
-                localStorage.removeItem('vibeMusic_playlist');
+                await clearDB();
                 playerEl.classList.remove('active');
                 welcomeScreen.classList.remove('hidden');
             }
         });
-
-        function savePlaylist() {
-            const playlistData = playlist.map(track => ({
-                name: track.name,
-                artist: track.artist,
-                fileName: track.file.name
-            }));
-            localStorage.setItem('vibeMusic_playlist', JSON.stringify(playlistData));
-        }
-
-        function loadPlaylist() {
-            const saved = localStorage.getItem('vibeMusic_playlist');
-            if (saved) {
-                const playlistData = JSON.parse(saved);
-            }
-        }
 
         function formatTime(seconds) {
             if (isNaN(seconds)) return '0:00';
